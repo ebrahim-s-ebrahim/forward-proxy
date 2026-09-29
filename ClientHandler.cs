@@ -18,7 +18,13 @@ public static class ClientHandler
                 var firstLine = text.Split("\r\n")[0];
                 var parts = firstLine.Split(' ');
 
-                ValidateRequest(parts);
+                // METHOD TARGET VERSION
+                if (parts.Length != 3)
+                {
+                    Console.WriteLine($"Bad request line: '{firstLine}'");
+                    await SendStatusAsync(stream, "400 Bad Request");
+                    return;
+                }
 
                 var method = parts[0];
 
@@ -28,10 +34,12 @@ public static class ClientHandler
                     return;
                 }
 
-                var target = parts[1];
-                var hostAndPort = target.Split(':');
-                var host = hostAndPort[0];
-                var port = int.Parse(hostAndPort[1]);
+                if (!TryParseTarget(parts[1], out var host, out var port))
+                {
+                    Console.WriteLine($"Bad CONNECT target: '{parts[1]}'");
+                    await SendStatusAsync(stream, "400 Bad Request");
+                    return;
+                }
 
                 Console.WriteLine($"{method} {host}:{port}");
 
@@ -42,16 +50,20 @@ public static class ClientHandler
                     await server.ConnectAsync(host, port, cts.Token);
                     Console.WriteLine($"Connected to {host}:{port} successfully!");
                 }
+                catch (OperationCanceledException)
+                {
+                    Console.WriteLine($"Timed out after 5s connecting to {host}:{port}");
+                    await SendStatusAsync(stream, "502 Bad Gateway");
+                    return;
+                }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Timed out after 5s, failed to connect to {host}:{port}: {ex.Message}");
-                    var failedReply = Encoding.ASCII.GetBytes("HTTP/1.1 502 Bad Gateway\r\n\r\n");
-                    await stream.WriteAsync(failedReply);
+                    Console.WriteLine($"Failed to connect to {host}:{port}: {ex.Message}");
+                    await SendStatusAsync(stream, "502 Bad Gateway");
                     return;
                 }
 
-                var reply = Encoding.ASCII.GetBytes("HTTP/1.1 200 Connection Established\r\n\r\n");
-                await stream.WriteAsync(reply);
+                await SendStatusAsync(stream, "200 Connection Established");
 
                 var serverStream = server.GetStream();
                 var up = stream.CopyToAsync(serverStream);
@@ -68,13 +80,28 @@ public static class ClientHandler
         }
     }
 
-    static void ValidateRequest(string[] reqParts)
+    static bool TryParseTarget(string target, out string host, out int port)
     {
-        //   - Does parts have at least 3 elements (method, target, version)?
+        host = "";
+        port = 0;
 
-        //   - Does the target contain exactly one :?
+        var hostAndPort = target.Split(':');
+        if (hostAndPort.Length != 2)
+            return false;
 
-        //   - Is the port really a number? Use int.TryParse instead of int.Parse: it returns
-        //     false instead of throwing.
+        if (hostAndPort[0].Length == 0)
+            return false;
+
+        if (!int.TryParse(hostAndPort[1], out port) || port < 1 || port > 65535)
+            return false;
+
+        host = hostAndPort[0];
+        return true;
+    }
+
+    static async Task SendStatusAsync(NetworkStream stream, string status)
+    {
+        var bytes = Encoding.ASCII.GetBytes($"HTTP/1.1 {status}\r\n\r\n");
+        await stream.WriteAsync(bytes);
     }
 }
